@@ -1,16 +1,13 @@
 import requests
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 
-#Компании для парса
-tickers = ["SBER", "GAZP", "LKOH", "GMKN", "YDEX"]
+def load_data_moex(ticker, date_from, date_till):
 
-
-def load_data_moex(ticker, data_from, data_till):
-
-    moexurl = f"https://iss.moex.com/iss/engines/stock/markets/shares/securities/{ticker}/candles.json"
+    moex_url = (
+        f"https://iss.moex.com/iss/engines/stock/"
+        f"markets/shares/securities/{ticker}/candles.json"
+    )
 
     full_data = []
     iter_start = 0
@@ -18,14 +15,19 @@ def load_data_moex(ticker, data_from, data_till):
     while True:
 
         params = {
-            "from": data_from,
-            "till": data_till,
+            "from": date_from,
+            "till": date_till,
             "interval": 24,
             "start": iter_start,
         }
 
-        response = requests.get(moexurl, params=params)
+        response = requests.get(
+            moex_url,
+            params=params
+        )
+
         response.raise_for_status()
+
         candles = response.json()["candles"]
         rows = candles["data"]
 
@@ -38,6 +40,7 @@ def load_data_moex(ticker, data_from, data_till):
         )
 
         full_data.append(df_part)
+
         print(
             f"{ticker}: загружено "
             f"{sum(len(x) for x in full_data)} строк"
@@ -45,39 +48,130 @@ def load_data_moex(ticker, data_from, data_till):
 
         iter_start += len(rows)
 
+    if not full_data:
+        return pd.DataFrame()
 
-    df = pd.concat(full_data, ignore_index=True)
+    df = pd.concat(
+        full_data,
+        ignore_index=True
+    )
+
     df["ticker"] = ticker
+
+    df["begin"] = pd.to_datetime(
+        df["begin"],
+        errors="coerce"
+    )
+
+    df["end"] = pd.to_datetime(
+        df["end"],
+        errors="coerce"
+    )
+
+    numeric_columns = [
+        "open",
+        "close",
+        "high",
+        "low",
+        "value",
+        "volume"
+    ]
+
+    for column in numeric_columns:
+
+        if column in df.columns:
+
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce"
+            )
+
+    df = df.drop_duplicates(
+        subset=[
+            "ticker",
+            "begin"
+        ]
+    )
+
+    df = df.sort_values(
+        [
+            "ticker",
+            "begin"
+        ]
+    ).reset_index(drop=True)
 
     return df
 
 
-data = []
+if __name__ == "__main__":
 
-for ticker in tickers:
+    tickers = [
+        "SBER",
+        "GAZP",
+        "LKOH",
+        "GMKN",
+        "YDEX",
+        "ROSN",
+        "NVTK",
+        "TATN",
+        "MGNT",
+        "MTSS"
+    ]
 
-    df_ticker = load_data_moex(
-        ticker,
-        "2020-01-01",
-        "2026-09-01"
-    )
+    date_from = "2020-01-01"
+    date_till = "2026-09-01"
 
-    data.append(df_ticker)
+    data = []
 
-df = pd.concat(data, ignore_index=True)
+    for ticker in tickers:
 
-print(df.groupby("ticker").size())
+        print(
+            f"\nЗагружаем {ticker}..."
+        )
 
-##EDA
+        df_ticker = load_data_moex(
+            ticker,
+            date_from,
+            date_till
+        )
 
-#print(df.info())
-#print(df.shape)
-#print(df.describe())
+        if df_ticker.empty:
 
-print(df.isna().sum())
-df = df.dropna()
+            print(
+                f"{ticker}: данных нет"
+            )
 
-df = df.drop_duplicates()
+            continue
 
-print(df[df["ticker"] == "SBER"])
+        data.append(df_ticker)
 
+        print(
+            f"{ticker}: "
+            f"{len(df_ticker)} строк"
+        )
+
+    if data:
+
+        df = pd.concat(
+            data,
+            ignore_index=True
+        )
+
+        print("\nИтог:")
+        print(df)
+
+        print("\nРазмер:")
+        print(df.shape)
+
+        print("\nКоличество записей по компаниям:")
+        print(
+            df.groupby("ticker").size()
+        )
+
+        print("\nПропуски:")
+        print(
+            df.isna().sum()
+        )
+
+        print("\nТипы данных:")
+        print(df.dtypes)
