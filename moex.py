@@ -175,3 +175,59 @@ if __name__ == "__main__":
 
         print("\nТипы данных:")
         print(df.dtypes)
+
+
+
+from db import get_connection
+
+
+def save_to_raw(df):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    query = """
+        INSERT INTO raw.moex_candles (
+            open,
+            close,
+            high,
+            low,
+            value,
+            volume,
+            begin,
+            end_time,
+            ticker
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (ticker, begin)
+        DO UPDATE SET
+            open = EXCLUDED.open,
+            close = EXCLUDED.close,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            value = EXCLUDED.value,
+            volume = EXCLUDED.volume,
+            end_time = EXCLUDED.end_time;
+    """
+
+    for _, row in df.iterrows():
+        cursor.execute(
+            query,
+            (
+                row["open"],
+                row["close"],
+                row["high"],
+                row["low"],
+                row["value"],
+                row["volume"],
+                row["begin"],
+                row["end"],
+                row["ticker"],
+            )
+        )
+
+    connection.commit()
+
+    cursor.close()
+    connection.close()
+
+    print(f"Загружено строк: {len(df)}")

@@ -1,5 +1,6 @@
 import pandas as pd
 import cbrapi as cbr
+from db import get_connection
 
 
 def load_data_cbr(currency_code, date_from, date_till):
@@ -30,8 +31,9 @@ def load_data_cbr(currency_code, date_from, date_till):
 
     df["currency"] = currency_code
 
-    df["currency_id"] = cbr.get_currency_code(
-        currency_code
+    df["currency_id"] = (
+        cbr.get_currency_code(currency_code)
+        .strip()
     )
 
     df = df[
@@ -275,3 +277,106 @@ if __name__ == "__main__":
 
         print("\nТипы данных:")
         print(key_rate.dtypes)
+
+
+def save_currency_to_raw(df):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    query = """
+        INSERT INTO raw.cbr_currency (
+            date,
+            currency,
+            currency_id,
+            value
+        )
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (date, currency)
+        DO UPDATE SET
+            currency_id = EXCLUDED.currency_id,
+            value = EXCLUDED.value;
+    """
+
+    for _, row in df.iterrows():
+        cursor.execute(
+            query,
+            (
+                row["date"],
+                row["currency"],
+                row["currency_id"],
+                row["value"]
+            )
+        )
+
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    print(f"Валюты: загружено {len(df)} строк")
+
+
+def save_metals_to_raw(df):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    query = """
+        INSERT INTO raw.cbr_metals (
+            date,
+            metal,
+            metal_id,
+            price
+        )
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (date, metal)
+        DO UPDATE SET
+            metal_id = EXCLUDED.metal_id,
+            price = EXCLUDED.price;
+    """
+
+    for _, row in df.iterrows():
+        cursor.execute(
+            query,
+            (
+                row["date"],
+                row["metal"],
+                row["metal_code"],
+                row["price"]
+            )
+        )
+
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    print(f"Металлы: загружено {len(df)} строк")
+
+
+def save_key_rate_to_raw(df):
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    query = """
+        INSERT INTO raw.cbr_key_rate (
+            date,
+            key_rate
+        )
+        VALUES (%s, %s)
+        ON CONFLICT (date)
+        DO UPDATE SET
+            key_rate = EXCLUDED.key_rate;
+    """
+
+    for _, row in df.iterrows():
+        cursor.execute(
+            query,
+            (
+                row["date"],
+                row["key_rate"]
+            )
+        )
+
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    print(f"Ключевая ставка: загружено {len(df)} строк")
