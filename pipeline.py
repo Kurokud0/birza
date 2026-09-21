@@ -24,12 +24,12 @@ def main():
         )
 
         if result.returncode != 0:
-            print(f"{name}: FAILED")
+            print(f"{name}: ошибка!")
             sys.exit(result.returncode)
 
-        print(f"{name}: SUCCESS")
+        print(f"{name}: успешно")
 
-    print("PIPELINE: SUCCESS")
+    print("PIPELINE: успешно!")
 
 
 if __name__ == "__main__":

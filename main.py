@@ -10,17 +10,32 @@ from cbr import (
 
 
 TICKERS = [
-    "SBER",
-    "GAZP",
-    "LKOH",
-    "GMKN",
-    "YDEX",
-    "ROSN",
-    "NVTK",
-    "TATN",
-    "MGNT",
-    "MTSS"
-]
+        "SBER",
+        "GAZP",
+        "LKOH",
+        "GMKN",
+        "YDEX",
+        "ROSN",
+        "NVTK",
+        "TATN",
+        "MGNT",
+        "MTSS",
+        "MOEX",
+        "VTBR",
+        "AFLT",
+        "ALRS",
+        "CHMF",
+        "NLMK",
+        "PLZL",
+        "PHOR",
+        "SNGS",
+        "SNGSP",
+        "TCSG",
+        "OZON",
+        "RUAL",
+        "PIKK",
+        "IRAO"
+    ]
 
 CURRENCIES = [
     "USD",
@@ -39,65 +54,43 @@ DATE_FROM = "2020-01-01"
 DATE_TILL = "2026-09-01"
 
 
-# =========================
 # MOEX
-# =========================
-
-print("\n=== MOEX ===")
+print("MOEX")
 
 for ticker in TICKERS:
-
     print(f"\nЗагрузка {ticker}...")
-
     df = load_data_moex(
         ticker=ticker,
         date_from=DATE_FROM,
         date_till=DATE_TILL
     )
-
     save_to_raw(df)
 
-
-# =========================
 # CBR — ВАЛЮТЫ
-# =========================
-
-print("\n=== CBR: ВАЛЮТЫ ===")
+print("CBR: валюты")
 
 for currency in CURRENCIES:
-
     print(f"\nЗагрузка {currency}...")
-
     df_currency = load_data_cbr(
         currency_code=currency,
         date_from=DATE_FROM,
         date_till=DATE_TILL
     )
-
     if not df_currency.empty:
         save_currency_to_raw(df_currency)
 
 
-# =========================
 # CBR — МЕТАЛЛЫ
-# =========================
-
-print("\n=== CBR: МЕТАЛЛЫ ===")
-
+print("CBR: металлы")
 df_metals = load_data_metals(
     date_from=DATE_FROM,
     date_till=DATE_TILL
 )
-
 if not df_metals.empty:
     save_metals_to_raw(df_metals)
 
-
-# =========================
-# CBR — КЛЮЧЕВАЯ СТАВКА
-# =========================
-
-print("\n=== CBR: КЛЮЧЕВАЯ СТАВКА ===")
+# CBR — ключевая ставка
+print("CBR: ключевая ставка")
 
 df_key_rate = load_data_key_rate(
     date_from=DATE_FROM,

@@ -92,16 +92,31 @@ queries = [
         INSERT INTO core.instruments
             (ticker, instrument_name, market, currency)
         VALUES
-            ('SBER', 'Сбербанк', 'MOEX', 'RUB'),
-            ('GAZP', 'Газпром', 'MOEX', 'RUB'),
-            ('LKOH', 'ЛУКОЙЛ', 'MOEX', 'RUB'),
-            ('GMKN', 'Норникель', 'MOEX', 'RUB'),
-            ('YDEX', 'Яндекс', 'MOEX', 'RUB'),
-            ('ROSN', 'Роснефть', 'MOEX', 'RUB'),
-            ('NVTK', 'Новатэк', 'MOEX', 'RUB'),
-            ('TATN', 'Татнефть', 'MOEX', 'RUB'),
-            ('MGNT', 'Магнит', 'MOEX', 'RUB'),
-            ('MTSS', 'МТС', 'MOEX', 'RUB')
+            ('SBER',  'Сбербанк',              'MOEX', 'RUB'),
+            ('GAZP',  'Газпром',               'MOEX', 'RUB'),
+            ('LKOH',  'ЛУКОЙЛ',                'MOEX', 'RUB'),
+            ('GMKN',  'Норникель',             'MOEX', 'RUB'),
+            ('YDEX',  'Яндекс',                'MOEX', 'RUB'),
+            ('ROSN',  'Роснефть',              'MOEX', 'RUB'),
+            ('NVTK',  'Новатэк',               'MOEX', 'RUB'),
+            ('TATN',  'Татнефть',              'MOEX', 'RUB'),
+            ('MGNT',  'Магнит',                'MOEX', 'RUB'),
+            ('MTSS',  'МТС',                   'MOEX', 'RUB'),
+            ('MOEX',  'Московская биржа',      'MOEX', 'RUB'),
+            ('VTBR',  'ВТБ',                    'MOEX', 'RUB'),
+            ('AFLT',  'Аэрофлот',               'MOEX', 'RUB'),
+            ('ALRS',  'Алроса',                 'MOEX', 'RUB'),
+            ('CHMF',  'Северсталь',             'MOEX', 'RUB'),
+            ('NLMK',  'НЛМК',                   'MOEX', 'RUB'),
+            ('PLZL',  'Полюс',                  'MOEX', 'RUB'),
+            ('PHOR',  'ФосАгро',                'MOEX', 'RUB'),
+            ('SNGS',  'Сургутнефтегаз',         'MOEX', 'RUB'),
+            ('SNGSP', 'Сургутнефтегаз-п',       'MOEX', 'RUB'),
+            ('TCSG',  'Т-Технологии',           'MOEX', 'RUB'),
+            ('OZON',  'Ozon',                   'MOEX', 'RUB'),
+            ('RUAL',  'Русал',                  'MOEX', 'RUB'),
+            ('PIKK',  'ПИК',                    'MOEX', 'RUB'),
+            ('IRAO',  'Интер РАО',             'MOEX', 'RUB')
         ON CONFLICT (ticker)
         DO UPDATE SET
             instrument_name = EXCLUDED.instrument_name,
@@ -180,36 +195,54 @@ queries = [
     (
         "mart.market_daily",
         """
-        INSERT INTO mart.market_daily
-            (trading_date, open, close, high, low, volume,
-             usd_rate, eur_rate, gold_price, key_rate)
+        INSERT INTO mart.market_daily (
+            ticker,
+            trading_date,
+            open,
+            close,
+            high,
+            low,
+            volume,
+            usd_rate,
+            eur_rate,
+            gold_price,
+            key_rate
+        )
         SELECT
+            i.ticker,
             mp.trading_date,
             mp.open,
             mp.close,
             mp.high,
             mp.low,
             mp.volume,
+
             usd.value,
             eur.value,
             gold.price,
             kr.key_rate
+
         FROM core.market_prices mp
+
         JOIN core.instruments i
             ON i.instrument_id = mp.instrument_id
+
         LEFT JOIN core.currency_rates usd
             ON usd.date = mp.trading_date
-           AND usd.currency = 'USD'
+            AND usd.currency = 'USD'
+
         LEFT JOIN core.currency_rates eur
             ON eur.date = mp.trading_date
-           AND eur.currency = 'EUR'
+            AND eur.currency = 'EUR'
+
         LEFT JOIN core.metal_prices gold
             ON gold.date = mp.trading_date
-           AND gold.metal = 'GOLD'
+            AND gold.metal = 'GOLD'
+
         LEFT JOIN core.key_rates kr
             ON kr.date = mp.trading_date
-        WHERE i.ticker = 'SBER'
-        ON CONFLICT (trading_date)
+
+        ON CONFLICT (ticker, trading_date)
         DO UPDATE SET
             open = EXCLUDED.open,
             close = EXCLUDED.close,
@@ -219,7 +252,8 @@ queries = [
             usd_rate = EXCLUDED.usd_rate,
             eur_rate = EXCLUDED.eur_rate,
             gold_price = EXCLUDED.gold_price,
-            key_rate = EXCLUDED.key_rate
+            key_rate = EXCLUDED.key_rate,
+            loaded_at = CURRENT_TIMESTAMP;
         """
     )
 ]

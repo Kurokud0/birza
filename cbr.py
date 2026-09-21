@@ -4,279 +4,54 @@ from db import get_connection
 
 
 def load_data_cbr(currency_code, date_from, date_till):
-
-    data = cbr.get_time_series(
-        currency_code,
-        date_from,
-        date_till,
-        period="D"
-    )
+    data = cbr.get_time_series(currency_code, date_from, date_till, period="D")
 
     if data is None or data.empty:
         return pd.DataFrame()
 
     df = data.reset_index()
-
-    df.columns = [
-        "date",
-        "value"
-    ]
-
+    df.columns = ["date", "value"]
     df["date"] = df["date"].dt.to_timestamp()
-
-    df["value"] = pd.to_numeric(
-        df["value"],
-        errors="coerce"
-    )
-
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
     df["currency"] = currency_code
+    df["currency_id"] = cbr.get_currency_code(currency_code).strip()
 
-    df["currency_id"] = (
-        cbr.get_currency_code(currency_code)
-        .strip()
-    )
-
-    df = df[
-        [
-            "date",
-            "currency",
-            "currency_id",
-            "value"
-        ]
-    ]
-
-    return df
+    return df[["date", "currency", "currency_id", "value"]]
 
 
 def load_data_metals(date_from, date_till):
-
-    data = cbr.get_metals_prices(
-        date_from,
-        date_till,
-        period="D"
-    )
+    data = cbr.get_metals_prices(date_from, date_till, period="D")
 
     if data is None or data.empty:
         return pd.DataFrame()
 
     df = data.reset_index()
-
-    df.columns = [
-        str(column).lower()
-        for column in df.columns
-    ]
-
-    df = df.rename(
-        columns={
-            "date": "date"
-        }
-    )
-
+    df.columns = [str(column).lower() for column in df.columns]
     df["date"] = df["date"].dt.to_timestamp()
 
-    df = df[
-        [
-            "date",
-            "gold",
-            "silver",
-            "platinum",
-            "palladium"
-        ]
-    ]
-
-    df = df.melt(
-        id_vars="date",
-        var_name="metal",
-        value_name="price"
-    )
-
+    df = df[["date", "gold", "silver", "platinum", "palladium"]]
+    df = df.melt(id_vars="date", var_name="metal", value_name="price")
     df["metal"] = df["metal"].str.upper()
 
-    metal_codes = {
-        "GOLD": 1,
-        "SILVER": 2,
-        "PLATINUM": 3,
-        "PALLADIUM": 4
-    }
+    metal_codes = {"GOLD": 1, "SILVER": 2, "PLATINUM": 3, "PALLADIUM": 4}
+    df["metal_code"] = df["metal"].map(metal_codes)
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
 
-    df["metal_code"] = df["metal"].map(
-        metal_codes
-    )
-
-    df["price"] = pd.to_numeric(
-        df["price"],
-        errors="coerce"
-    )
-
-    df = df[
-        [
-            "date",
-            "metal",
-            "metal_code",
-            "price"
-        ]
-    ]
-
-    return df
+    return df[["date", "metal", "metal_code", "price"]]
 
 
 def load_data_key_rate(date_from, date_till):
-
-    data = cbr.get_key_rate(
-        date_from,
-        date_till,
-        period="D"
-    )
+    data = cbr.get_key_rate(date_from, date_till, period="D")
 
     if data is None or data.empty:
         return pd.DataFrame()
 
     df = data.reset_index()
-
-    df.columns = [
-        "date",
-        "key_rate"
-    ]
-
+    df.columns = ["date", "key_rate"]
     df["date"] = df["date"].dt.to_timestamp()
+    df["key_rate"] = pd.to_numeric(df["key_rate"], errors="coerce")
 
-    df["key_rate"] = pd.to_numeric(
-        df["key_rate"],
-        errors="coerce"
-    )
-
-    df = df.sort_values(
-        "date"
-    ).reset_index(drop=True)
-
-    return df
-
-
-if __name__ == "__main__":
-
-    date_from = "2020-01-01"
-    date_till = "2026-09-01"
-
-
-    currencies = [
-        "USD",
-        "EUR",
-        "CNY",
-        "GBP",
-        "JPY",
-        "CHF",
-        "TRY",
-        "AED",
-        "KZT",
-        "INR"
-    ]
-
-    data = []
-
-    for currency_code in currencies:
-
-        print(
-            f"Загружаем {currency_code}..."
-        )
-
-        df_currency = load_data_cbr(
-            currency_code,
-            date_from,
-            date_till
-        )
-
-        if df_currency.empty:
-
-            print(
-                f"{currency_code}: данных нет"
-            )
-
-            continue
-
-        data.append(df_currency)
-
-        print(
-            f"{currency_code}: "
-            f"{len(df_currency)} строк"
-        )
-
-
-    df = pd.concat(
-        data,
-        ignore_index=True
-    )
-
-
-    print("Валюты")
-
-    print("\nИтог:")
-    print(df)
-
-    print("\nРазмер:")
-    print(df.shape)
-
-    print("\nКоличество записей по валютам:")
-    print(
-        df.groupby("currency").size()
-    )
-
-    print("\nТипы данных:")
-    print(df.dtypes)
-
-
-    print("Драгоценные металлы")
-    print("\nЗагружаем драгоценные металлы...")
-
-    metals = load_data_metals(
-        date_from,
-        date_till
-    )
-
-
-    if metals.empty:
-
-        print("Данных по металлам нет")
-
-    else:
-
-        print("\nДрагоценные металлы:")
-        print(metals)
-
-        print("\nРазмер:")
-        print(metals.shape)
-
-        print("\nКоличество записей по металлам:")
-        print(
-            metals.groupby("metal").size()
-        )
-
-        print("\nТипы данных:")
-        print(metals.dtypes)
-
-
-    print("Ключевая ставка")
-    print("\nЗагружаем ключевую ставку...")
-
-    key_rate = load_data_key_rate(
-        date_from,
-        date_till
-    )
-
-
-    if key_rate.empty:
-
-        print("Данных по ключевой ставке нет")
-
-    else:
-
-        print("\nКлючевая ставка:")
-        print(key_rate)
-
-        print("\nРазмер:")
-        print(key_rate.shape)
-
-        print("\nТипы данных:")
-        print(key_rate.dtypes)
+    return df.sort_values("date").reset_index(drop=True)
 
 
 def save_currency_to_raw(df):
@@ -284,12 +59,7 @@ def save_currency_to_raw(df):
     cursor = connection.cursor()
 
     query = """
-        INSERT INTO raw.cbr_currency (
-            date,
-            currency,
-            currency_id,
-            value
-        )
+        INSERT INTO raw.cbr_currency (date, currency, currency_id, value)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (date, currency)
         DO UPDATE SET
@@ -298,21 +68,13 @@ def save_currency_to_raw(df):
     """
 
     for _, row in df.iterrows():
-        cursor.execute(
-            query,
-            (
-                row["date"],
-                row["currency"],
-                row["currency_id"],
-                row["value"]
-            )
-        )
+        cursor.execute(query, (row["date"], row["currency"], row["currency_id"], row["value"]))
 
     connection.commit()
     cursor.close()
     connection.close()
 
-    print(f"Валюты: загружено {len(df)} строк")
+    print(f"Валюты: {len(df)} строк")
 
 
 def save_metals_to_raw(df):
@@ -320,12 +82,7 @@ def save_metals_to_raw(df):
     cursor = connection.cursor()
 
     query = """
-        INSERT INTO raw.cbr_metals (
-            date,
-            metal,
-            metal_id,
-            price
-        )
+        INSERT INTO raw.cbr_metals (date, metal, metal_id, price)
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (date, metal)
         DO UPDATE SET
@@ -334,21 +91,13 @@ def save_metals_to_raw(df):
     """
 
     for _, row in df.iterrows():
-        cursor.execute(
-            query,
-            (
-                row["date"],
-                row["metal"],
-                row["metal_code"],
-                row["price"]
-            )
-        )
+        cursor.execute(query, (row["date"], row["metal"], row["metal_code"], row["price"]))
 
     connection.commit()
     cursor.close()
     connection.close()
 
-    print(f"Металлы: загружено {len(df)} строк")
+    print(f"Металлы: {len(df)} строк")
 
 
 def save_key_rate_to_raw(df):
@@ -356,10 +105,7 @@ def save_key_rate_to_raw(df):
     cursor = connection.cursor()
 
     query = """
-        INSERT INTO raw.cbr_key_rate (
-            date,
-            key_rate
-        )
+        INSERT INTO raw.cbr_key_rate (date, key_rate)
         VALUES (%s, %s)
         ON CONFLICT (date)
         DO UPDATE SET
@@ -367,16 +113,36 @@ def save_key_rate_to_raw(df):
     """
 
     for _, row in df.iterrows():
-        cursor.execute(
-            query,
-            (
-                row["date"],
-                row["key_rate"]
-            )
-        )
+        cursor.execute(query, (row["date"], row["key_rate"]))
 
     connection.commit()
     cursor.close()
     connection.close()
 
-    print(f"Ключевая ставка: загружено {len(df)} строк")
+    print(f"Ключевая ставка: {len(df)} строк")
+
+
+if __name__ == "__main__":
+    date_from = "2020-01-01"
+    date_till = "2026-09-12"
+
+    currencies = ["USD", "EUR", "CNY", "GBP", "JPY", "CHF", "TRY", "AED", "KZT", "INR"]
+
+    currency_data = []
+
+    for currency_code in currencies:
+        df_currency = load_data_cbr(currency_code, date_from, date_till)
+
+        if not df_currency.empty:
+            currency_data.append(df_currency)
+            print(f"{currency_code}: {len(df_currency)} строк")
+
+    if currency_data:
+        currencies_df = pd.concat(currency_data, ignore_index=True)
+        print(f"Валюты: {len(currencies_df)} строк")
+
+    metals_df = load_data_metals(date_from, date_till)
+    print(f"Металлы: {len(metals_df)} строк")
+
+    key_rate_df = load_data_key_rate(date_from, date_till)
+    print(f"Ключевая ставка: {len(key_rate_df)} строк")

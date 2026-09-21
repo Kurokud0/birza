@@ -1,19 +1,37 @@
+import warnings
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.dummy import DummyClassifier
+from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import (
     accuracy_score,
-    balanced_accuracy_score,
     precision_score,
     recall_score,
     f1_score,
+    roc_auc_score,
+    balanced_accuracy_score,
 )
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
+from xgboost import XGBClassifier
+
 from db import get_connection
 
 
-N_SPLITS = 5
+warnings.filterwarnings("ignore")
+
+
+# Настройки
+PERIODS = {
+    "2020-2026": "2020-01-01",
+    "2022-2026": "2022-01-01",
+    "2024-2026": "2024-01-01",
+    "2025-2026": "2025-01-01",
+}
+
+TEST_SIZE = 0.20
+
+SEARCH_SPLITS = 3
+N_ITER = 12
 RANDOM_STATE = 42
 
 FEATURES = [
@@ -27,64 +45,139 @@ FEATURES = [
 ]
 
 
+# Загрузка данных
 def load_data():
     conn = get_connection()
 
     query = """
         SELECT
+            ticker,
             trading_date,
             close,
             volume,
             usd_rate,
             gold_price
         FROM mart.market_daily
-        ORDER BY trading_date
+        ORDER BY ticker, trading_date
     """
 
     df = pd.read_sql(query, conn)
+
     conn.close()
 
     df["trading_date"] = pd.to_datetime(df["trading_date"])
 
-    for column in ["close", "volume", "usd_rate", "gold_price"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-
-    return df.sort_values("trading_date").reset_index(drop=True)
+    return df
 
 
-def create_features(df):
+# Признаки
+def prepare_features(df):
     df = df.copy()
-    df["return_1d"] = df["close"].pct_change(1)
-    df["return_3d"] = df["close"].pct_change(3)
-    df["return_5d"] = df["close"].pct_change(5)
-    df["volatility_5"] = df["return_1d"].rolling(5).std()
-    df["volatility_20"] = df["return_1d"].rolling(20).std()
-    ma_5 = df["close"].rolling(5).mean()
-    ma_20 = df["close"].rolling(20).mean()
-    df["ma_ratio_5"] = df["close"] / ma_5 - 1
-    df["ma_ratio_20"] = df["close"] / ma_20 - 1
-    future_return = df["close"].shift(-1) / df["close"] - 1
-    df["target"] = (future_return > 0).astype(int)
+
+    df = df.sort_values(["ticker", "trading_date"])
+
+    grouped = df.groupby("ticker", group_keys=False)
+
+    df["return_1d"] = grouped["close"].pct_change(1)
+    df["return_3d"] = grouped["close"].pct_change(3)
+    df["return_5d"] = grouped["close"].pct_change(5)
+
+    df["volatility_5"] = (
+        grouped["close"]
+        .pct_change()
+        .rolling(5)
+        .std()
+        .reset_index(level=0, drop=True)
+    )
+
+    df["volatility_20"] = (
+        grouped["close"]
+        .pct_change()
+        .rolling(20)
+        .std()
+        .reset_index(level=0, drop=True)
+    )
+
+    ma_5 = (
+        grouped["close"]
+        .rolling(5)
+        .mean()
+        .reset_index(level=0, drop=True)
+    )
+
+    ma_20 = (
+        grouped["close"]
+        .rolling(20)
+        .mean()
+        .reset_index(level=0, drop=True)
+    )
+
+    df["ma_ratio_5"] = df["close"] / ma_5
+    df["ma_ratio_20"] = df["close"] / ma_20
+
+    # Следующий торговый день
+    df["next_return"] = (
+        grouped["close"].shift(-1) / df["close"] - 1
+    )
+
+    # Класс:
+    # 1 = рост
+    # 0 = снижение
+    df["target"] = (df["next_return"] > 0).astype(int)
+
+    df = df.dropna(subset=FEATURES + ["next_return"])
 
     return df
 
 
-def create_models():
-    return {
-        "Dummy": DummyClassifier(
-            strategy="most_frequent"
-        ),
-        "GradientBoosting": GradientBoostingClassifier(
-            n_estimators=150,
-            learning_rate=0.03,
-            max_depth=2,
-            random_state=RANDOM_STATE
-        ),
-    }
+
+# Модели
+def create_dummy():
+    return DummyClassifier(
+        strategy="prior"
+    )
 
 
-def calculate_metrics(y_true, y_pred):
-    return {
+def create_gradient_boosting():
+    return GradientBoostingClassifier(
+        n_estimators=200,
+        learning_rate=0.03,
+        max_depth=3,
+        min_samples_split=10,
+        min_samples_leaf=5,
+        subsample=0.8,
+        random_state=RANDOM_STATE,
+    )
+
+
+def create_xgb():
+    return XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="logloss",
+        tree_method="hist",
+        n_jobs=-1,
+        random_state=RANDOM_STATE,
+    )
+
+
+# Пространство XGBOOST
+XGB_PARAMS = {
+    "n_estimators": [100, 200, 300, 400],
+    "learning_rate": [0.01, 0.03, 0.05, 0.10],
+    "max_depth": [2, 3, 4, 5],
+    "min_child_weight": [1, 3, 5, 10],
+    "subsample": [0.7, 0.8, 0.9, 1.0],
+    "colsample_bytree": [0.7, 0.8, 0.9, 1.0],
+    "gamma": [0.0, 0.05, 0.10, 0.20],
+    "reg_alpha": [0.0, 0.01, 0.10, 0.50],
+    "reg_lambda": [1, 2, 5, 10],
+}
+
+
+# Метрики
+
+def calculate_metrics(y_true, y_pred, y_prob):
+    result = {
         "accuracy": accuracy_score(y_true, y_pred),
         "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
         "precision": precision_score(
@@ -104,263 +197,468 @@ def calculate_metrics(y_true, y_pred):
         ),
     }
 
-
-def evaluate_time_series(X, y, model_name, model):
-    tscv = TimeSeriesSplit(n_splits=N_SPLITS)
-    fold_results = []
-    print(f"МОДЕЛЬ: {model_name}")
-    for fold, (train_index, test_index) in enumerate(
-        tscv.split(X),
-        start=1
-    ):
-        X_train = X.iloc[train_index]
-        X_test = X.iloc[test_index]
-        y_train = y.iloc[train_index]
-        y_test = y.iloc[test_index]
-        model.fit(X_train, y_train)
-        predictions = model.predict(X_test)
-        metrics = calculate_metrics(
-            y_test,
-            predictions
+    if len(np.unique(y_true)) == 2:
+        result["roc_auc"] = roc_auc_score(
+            y_true,
+            y_prob
         )
-        fold_results.append({
-            "fold": fold,
-            **metrics
-        })
+    else:
+        result["roc_auc"] = np.nan
 
-        print(f"\nФолд {fold}")
-        print(f"Train: {len(train_index)}")
-        print(f"Test:  {len(test_index)}")
-        print(f"Accuracy: {metrics['accuracy']:.4f}")
-        print(
-            f"Balanced Accuracy: "
-            f"{metrics['balanced_accuracy']:.4f}"
-        )
-        print(f"Precision: {metrics['precision']:.4f}")
-        print(f"Recall: {metrics['recall']:.4f}")
-        print(f"F1: {metrics['f1']:.4f}")
-
-    fold_df = pd.DataFrame(fold_results)
-
-    metric_columns = [
-        "accuracy",
-        "balanced_accuracy",
-        "precision",
-        "recall",
-        "f1",
-    ]
-
-    mean_metrics = fold_df[metric_columns].mean()
-    std_metrics = fold_df[metric_columns].std()
-
-    print("СРЕДНИЕ ЗНАЧЕНИЯ")
-
-    for metric in metric_columns:
-        print(
-            f"{metric.replace('_', ' ').title()}: "
-            f"{mean_metrics[metric]:.4f} "
-            f"+/- "
-            f"{std_metrics[metric]:.4f}"
-        )
-
-    return fold_df, mean_metrics, std_metrics
+    return result
 
 
-def evaluate_holdout(X, y, model_name, model):
-    split_index = int(len(X) * 0.8)
-
-    X_train = X.iloc[:split_index]
-    X_test = X.iloc[split_index:]
-    y_train = y.iloc[:split_index]
-    y_test = y.iloc[split_index:]
+# Оценка TEST
+def evaluate_model(model, X_train, y_train, X_test, y_test):
     model.fit(X_train, y_train)
+
     predictions = model.predict(X_test)
+
+    probabilities = model.predict_proba(X_test)[:, 1]
+
     metrics = calculate_metrics(
         y_test,
-        predictions
+        predictions,
+        probabilities
     )
-
-    print(f"HOLDOUT: {model_name}")
-    print(f"Train: {len(X_train)}")
-    print(f"Test:  {len(X_test)}")
-
-    for metric, value in metrics.items():
-        print(
-            f"{metric.replace('_', ' ').title()}: "
-            f"{value:.4f}"
-        )
 
     return metrics
 
 
-def make_latest_prediction(df, model):
-    data = df.dropna(subset=FEATURES).copy()
-    X = data[FEATURES]
-    y = data["target"]
-    model.fit(X, y)
-    latest_X = X.iloc[[-1]]
-    prediction = int(model.predict(latest_X)[0])
-    probability_growth = np.nan
+# Подбор XGBOOST
+def tune_xgboost(X_train, y_train):
+    tscv = TimeSeriesSplit(
+        n_splits=SEARCH_SPLITS
+    )
 
-    if hasattr(model, "predict_proba"):
-        probability_growth = float(
-            model.predict_proba(latest_X)[0][1]
-        )
+    search = RandomizedSearchCV(
+        estimator=create_xgb(),
+        param_distributions=XGB_PARAMS,
+        n_iter=N_ITER,
+        scoring="roc_auc",
+        cv=tscv,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+        refit=True,
+        verbose=0,
+    )
+
+    search.fit(X_train, y_train)
+
+    return search.best_params_
+
+
+# Обучение XGBOOST
+def create_tuned_xgb(params):
+    base_params = {
+        "objective": "binary:logistic",
+        "eval_metric": "logloss",
+        "tree_method": "hist",
+        "n_jobs": -1,
+        "random_state": RANDOM_STATE,
+    }
+
+    base_params.update(params)
+
+    return XGBClassifier(**base_params)
+
+
+# Основа
+def run_experiment(df):
+    results = []
+    final_forecasts = []
+    best_params = []
+
+    tickers = sorted(df["ticker"].unique())
+
+    total_tasks = len(tickers) * len(PERIODS)
+    current_task = 0
+
+    for ticker in tickers:
+
+        ticker_df = df[
+            df["ticker"] == ticker
+        ].copy()
+
+        for period, start_date in PERIODS.items():
+
+            current_task += 1
+
+            print(
+                f"[{current_task}/{total_tasks}] "
+                f"{ticker} | {period}"
+            )
+
+            period_df = ticker_df[
+                ticker_df["trading_date"] >= start_date
+            ].copy()
+
+            period_df = period_df.sort_values(
+                "trading_date"
+            )
+
+            if len(period_df) < 100:
+                print("  пропуск: мало данных")
+                continue
+
+            X = period_df[FEATURES]
+            y = period_df["target"]
+
+            # Разделение на train/test
+
+            split_index = int(
+                len(period_df) * (1 - TEST_SIZE)
+            )
+
+            X_train = X.iloc[:split_index]
+            y_train = y.iloc[:split_index]
+
+            X_test = X.iloc[split_index:]
+            y_test = y.iloc[split_index:]
+
+            # DUMMY
+            dummy = create_dummy()
+
+            dummy_metrics = evaluate_model(
+                dummy,
+                X_train,
+                y_train,
+                X_test,
+                y_test
+            )
+
+            results.append({
+                "ticker": ticker,
+                "period": period,
+                "model": "Dummy",
+                **dummy_metrics
+            })
+
+            # GRADIENT BOOSTING
+            gb = create_gradient_boosting()
+
+            gb_metrics = evaluate_model(
+                gb,
+                X_train,
+                y_train,
+                X_test,
+                y_test
+            )
+
+            results.append({
+                "ticker": ticker,
+                "period": period,
+                "model": "GradientBoosting",
+                **gb_metrics
+            })
+
+            # XGBOOST HYPERPARAMETER SEARCH
+
+            best_xgb_params = tune_xgboost(
+                X_train,
+                y_train
+            )
+
+            best_params.append({
+                "ticker": ticker,
+                "period": period,
+                **best_xgb_params
+            })
+
+            # XGBOOST
+
+            xgb = create_tuned_xgb(
+                best_xgb_params
+            )
+
+            xgb_metrics = evaluate_model(
+                xgb,
+                X_train,
+                y_train,
+                X_test,
+                y_test
+            )
+
+            results.append({
+                "ticker": ticker,
+                "period": period,
+                "model": "XGBoost",
+                **xgb_metrics
+            })
+
+            # ФИНАЛЬНЫЙ XGBOOST
+            final_model = create_tuned_xgb(
+                best_xgb_params
+            )
+
+            final_model.fit(
+                X,
+                y
+            )
+
+            last_row = period_df.iloc[[-1]]
+
+            X_last = last_row[FEATURES]
+
+            prediction = int(
+                final_model.predict(X_last)[0]
+            )
+
+            probability_growth = float(
+                final_model.predict_proba(X_last)[0, 1]
+            )
+
+            probability_down = (
+                1 - probability_growth
+            )
+
+            final_forecasts.append({
+                "ticker": ticker,
+                "period": period,
+                "model": "XGBoost",
+                "forecast_date": last_row[
+                    "trading_date"
+                ].iloc[0],
+                "close": last_row[
+                    "close"
+                ].iloc[0],
+                "prediction": (
+                    "GROWTH"
+                    if prediction == 1
+                    else "DOWN"
+                ),
+                "probability_growth": (
+                    f"{probability_growth:.2%}"
+                ),
+                "probability_down": (
+                    f"{probability_down:.2%}"
+                ),
+            })
 
     return (
-        data["trading_date"].iloc[-1],
-        data["close"].iloc[-1],
-        prediction,
-        probability_growth
+        pd.DataFrame(results),
+        pd.DataFrame(final_forecasts),
+        pd.DataFrame(best_params),
     )
 
 
-def main():
-    print("CLASSIFICATION — STABILITY CHECK")
-    df = load_data()
-    print(f"\nИсходные данные: {df.shape}")
-    print(
-        f"Период: "
-        f"{df['trading_date'].min().date()} "
-        f"— "
-        f"{df['trading_date'].max().date()}"
-    )
+# СВОДНАЯ СТАТИСТИКА
 
-    df = create_features(df)
+def print_summary(results):
+    print("Средние результаты TEST")
 
-    data = df[
-        ["trading_date", "close"] +
-        FEATURES +
-        ["target"]
-    ].dropna()
-
-    X = data[FEATURES]
-    y = data["target"]
-
-    print(f"\nПосле подготовки: {data.shape}")
-    print(f"Количество признаков: {len(FEATURES)}")
-    print(f"Размер выборки: {X.shape}")
-
-    class_distribution = (
-        y.value_counts(normalize=True)
-        .sort_index()
-    )
-
-    print("РАСПРЕДЕЛЕНИЕ КЛАССОВ")
-    print(
-        f"DOWN: "
-        f"{class_distribution.get(0, 0) * 100:.2f}%"
+    summary = (
+        results
+        .groupby(["period", "model"])[
+            [
+                "accuracy",
+                "balanced_accuracy",
+                "precision",
+                "recall",
+                "f1",
+                "roc_auc",
+            ]
+        ]
+        .mean()
+        .reset_index()
     )
 
     print(
-        f"GROWTH: "
-        f"{class_distribution.get(1, 0) * 100:.2f}%"
+        summary.to_string(
+            index=False,
+            formatters={
+                "accuracy": "{:.2%}".format,
+                "balanced_accuracy": "{:.2%}".format,
+                "precision": "{:.2%}".format,
+                "recall": "{:.2%}".format,
+                "f1": "{:.2%}".format,
+                "roc_auc": "{:.3f}".format,
+            },
+        )
     )
 
-    models = create_models()
-    results = {}
-    for model_name, model in models.items():
-        fold_df, mean_metrics, std_metrics = (
-            evaluate_time_series(
-                X,
-                y,
-                model_name,
-                model
+    print()
+    print("Победители по ACCURACY")
+
+    winners = []
+
+    for period in PERIODS:
+
+        period_results = results[
+            results["period"] == period
+        ]
+
+        mean_scores = (
+            period_results
+            .groupby("model")["accuracy"]
+            .mean()
+            .sort_values(
+                ascending=False
             )
         )
 
-        results[model_name] = {
-            "folds": fold_df,
-            "mean": mean_metrics,
-            "std": std_metrics,
-        }
+        winner = mean_scores.index[0]
 
-    print("СРАВНЕНИЕ МОДЕЛЕЙ")
-    comparison = []
-    for model_name, result in results.items():
-        comparison.append({
-            "model": model_name,
-            "accuracy": result["mean"]["accuracy"],
-            "balanced_accuracy": result["mean"]["balanced_accuracy"],
-            "balanced_std": result["std"]["balanced_accuracy"],
-            "f1": result["mean"]["f1"],
+        winners.append({
+            "period": period,
+            "winner": winner,
+            "accuracy": mean_scores.iloc[0],
         })
 
-    comparison_df = (
-        pd.DataFrame(comparison)
-        .sort_values(
-            "balanced_accuracy",
-            ascending=False
+    winners_df = pd.DataFrame(winners)
+
+    print(
+        winners_df.to_string(
+            index=False,
+            formatters={
+                "accuracy": "{:.2%}".format
+            }
         )
     )
 
-    print(
-        comparison_df.to_string(index=False)
-    )
+    print()
+    print("=" * 100)
+    print("КОЛИЧЕСТВО ПОБЕД XGBOOST")
+    print("=" * 100)
 
-    best_model_name = comparison_df.iloc[0]["model"]
+    wins = 0
+    total = 0
 
-    print(
-        f"\nЛучшая модель по Balanced Accuracy: "
-        f"{best_model_name}"
-    )
+    for _, group in results.groupby(
+        ["ticker", "period"]
+    ):
 
-    holdout_model = create_models()[best_model_name]
-
-    holdout_metrics = evaluate_holdout(
-        X,
-        y,
-        best_model_name,
-        holdout_model
-    )
-
-    final_model = create_models()[best_model_name]
-
-    (
-        latest_date,
-        latest_close,
-        prediction,
-        probability_growth
-    ) = make_latest_prediction(
-        df,
-        final_model
-    )
-
-    print("ФИНАЛЬНЫЙ ПРОГНОЗ")
-    print(f"\nДата: {latest_date.date()}")
-    print(f"Цена закрытия: {latest_close:.2f}")
-    print("Горизонт: 1 торговый день")
-    print(f"Модель: {best_model_name}")
-    print(
-        f"Прогноз: "
-        f"{'GROWTH' if prediction == 1 else 'DOWN'}"
-    )
-
-    if not np.isnan(probability_growth):
-        print(
-            f"Вероятность роста: "
-            f"{probability_growth * 100:.2f}%"
+        best_model = (
+            group
+            .sort_values(
+                "accuracy",
+                ascending=False
+            )
+            .iloc[0]["model"]
         )
 
-        print(
-            f"Вероятность снижения: "
-            f"{(1 - probability_growth) * 100:.2f}%"
+        total += 1
+
+        if best_model == "XGBoost":
+            wins += 1
+
+    print(
+        f"XGBoost победил в {wins} из {total} "
+        f"экспериментов ({wins / total:.2%})"
+    )
+
+
+# ФИНАЛЬНЫЕ ПРОГНОЗЫ
+
+def print_forecasts(forecasts):
+    print()
+    print("=" * 100)
+    print("ФИНАЛЬНЫЕ ПРОГНОЗЫ")
+    print("=" * 100)
+
+    print(
+        forecasts.to_string(
+            index=False
         )
+    )
+
+
+# КОМПАКТНЫЕ ПАРАМЕТРЫ XGBOOST
+
+def print_best_params(params):
+    print()
+    print("=" * 100)
+    print("ЧАСТОТА ВЫБРАННЫХ ПАРАМЕТРОВ XGBOOST")
+    print("=" * 100)
+
+    parameter_columns = [
+        "n_estimators",
+        "learning_rate",
+        "max_depth",
+        "min_child_weight",
+        "subsample",
+        "colsample_bytree",
+        "gamma",
+        "reg_alpha",
+        "reg_lambda",
+    ]
+
+    for column in parameter_columns:
+
+        counts = (
+            params[column]
+            .value_counts()
+            .head(5)
+        )
+
+        print(f"\n{column}:")
+        print(counts.to_string())
+
+
+# MAIN
+
+def main():
+
+    print("=" * 100)
+    print("ЗАГРУЗКА ДАННЫХ")
+    print("=" * 100)
+
+    df = load_data()
+
+    print(
+        f"Загружено строк: {len(df):,}"
+    )
+
+    df = prepare_features(df)
+
+    print(
+        f"После подготовки признаков: {len(df):,}"
+    )
+
+    print()
+    print("=" * 100)
+    print("ЗАПУСК ЭКСПЕРИМЕНТА")
+    print("=" * 100)
+
+    results, forecasts, params = run_experiment(
+        df
+    )
+
+    # РЕЗУЛЬТАТЫ
+
+    print_summary(results)
+
+    print_forecasts(forecasts)
+
+    print_best_params(params)
+
+    # ИТОГ
 
     print("ИТОГ")
-    best_result = results[best_model_name]
-    print(f"\nМодель: {best_model_name}")
+
     print(
-        f"Средняя Balanced Accuracy: "
-        f"{best_result['mean']['balanced_accuracy']:.4f}"
+        f"Компаний: "
+        f"{results['ticker'].nunique()}/25"
     )
+
     print(
-        f"Стандартное отклонение: "
-        f"{best_result['std']['balanced_accuracy']:.4f}"
+        f"Периодов: "
+        f"{results['period'].nunique()}/4"
     )
+
     print(
-        f"Holdout Balanced Accuracy: "
-        f"{holdout_metrics['balanced_accuracy']:.4f}"
+        f"Оценок моделей: "
+        f"{len(results)}"
+    )
+
+    print(
+        f"Финальных прогнозов: "
+        f"{len(forecasts)}"
+    )
+
+    print(
+        f"Подборов XGBoost: "
+        f"{len(params)}"
     )
 
 

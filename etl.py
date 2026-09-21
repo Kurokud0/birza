@@ -22,7 +22,22 @@ TICKERS = [
     "NVTK",
     "TATN",
     "MGNT",
-    "MTSS"
+    "MTSS",
+    "MOEX",
+    "VTBR",
+    "AFLT",
+    "ALRS",
+    "CHMF",
+    "NLMK",
+    "PLZL",
+    "PHOR",
+    "SNGS",
+    "SNGSP",
+    "TCSG",
+    "OZON",
+    "RUAL",
+    "PIKK",
+    "IRAO"
 ]
 
 CURRENCIES = [
@@ -111,7 +126,6 @@ def write_log(
     )
 
     connection.commit()
-
     cursor.close()
     connection.close()
 
@@ -410,7 +424,7 @@ def run_key_rate():
                 "SUCCESS",
                 0
             )
-            print("\nКлючевая ставка: новых данных нет")
+            print("Ключевая ставка: новых данных нет")
             return
 
         print(
@@ -473,22 +487,22 @@ def run_key_rate():
 
 
 def main():
-    print("ЗАПУСК ETL")
+    print("Запуск ETL")
     print(f"Дата запуска: {datetime.now()}")
 
-    print("\n=== MOEX ===")
+    print("MOEX")
     run_moex()
 
-    print("\n=== CBR CURRENCY ===")
+    print("CBR CURRENCY")
     run_currency()
 
-    print("\n=== CBR METALS ===")
+    print("CBR METALS")
     run_metals()
 
-    print("\n=== CBR KEY RATE ===")
+    print("CBR KEY RATE")
     run_key_rate()
 
-    print("\nETL ЗАВЕРШЕН")
+    print("ETL завершен!")
 
 
 if __name__ == "__main__":
