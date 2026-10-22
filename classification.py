@@ -1,26 +1,24 @@
 import warnings
+
 import numpy as np
 import pandas as pd
 from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
     precision_score,
     recall_score,
-    f1_score,
     roc_auc_score,
-    balanced_accuracy_score,
 )
-from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 from xgboost import XGBClassifier
 
 from db import get_connection
 
-
 warnings.filterwarnings("ignore")
 
-
-# Настройки
 PERIODS = {
     "2020-2026": "2020-01-01",
     "2022-2026": "2022-01-01",
@@ -29,7 +27,6 @@ PERIODS = {
 }
 
 TEST_SIZE = 0.20
-
 SEARCH_SPLITS = 3
 N_ITER = 12
 RANDOM_STATE = 42
@@ -44,98 +41,76 @@ FEATURES = [
     "ma_ratio_20",
 ]
 
+XGB_PARAMS = {
+    "n_estimators": [100, 200, 300, 400],
+    "learning_rate": [0.01, 0.03, 0.05, 0.10],
+    "max_depth": [2, 3, 4, 5],
+    "min_child_weight": [1, 3, 5, 10],
+    "subsample": [0.7, 0.8, 0.9, 1.0],
+    "colsample_bytree": [0.7, 0.8, 0.9, 1.0],
+    "gamma": [0.0, 0.05, 0.10, 0.20],
+    "reg_alpha": [0.0, 0.01, 0.10, 0.50],
+    "reg_lambda": [1, 2, 5, 10],
+}
 
-# Загрузка данных
+
 def load_data():
     conn = get_connection()
-
-    query = """
-        SELECT
-            ticker,
-            trading_date,
-            close,
-            volume,
-            usd_rate,
-            gold_price
-        FROM mart.market_daily
-        ORDER BY ticker, trading_date
-    """
-
-    df = pd.read_sql(query, conn)
-
-    conn.close()
+    try:
+        df = pd.read_sql(
+            """
+            SELECT ticker, trading_date, close, volume, usd_rate, gold_price
+            FROM mart.market_daily
+            ORDER BY ticker, trading_date
+            """,
+            conn,
+        )
+    finally:
+        conn.close()
 
     df["trading_date"] = pd.to_datetime(df["trading_date"])
+    return df.sort_values(["ticker", "trading_date"]).reset_index(drop=True)
 
-    return df
 
-
-# Признаки
 def prepare_features(df):
     df = df.copy()
-
-    df = df.sort_values(["ticker", "trading_date"])
-
-    grouped = df.groupby("ticker", group_keys=False)
-
-    df["return_1d"] = grouped["close"].pct_change(1)
-    df["return_3d"] = grouped["close"].pct_change(3)
-    df["return_5d"] = grouped["close"].pct_change(5)
-
-    df["volatility_5"] = (
-        grouped["close"]
-        .pct_change()
-        .rolling(5)
-        .std()
-        .reset_index(level=0, drop=True)
+    df["ticker"] = df["ticker"].astype(str).str.strip()
+    df["trading_date"] = pd.to_datetime(df["trading_date"], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df = (
+        df.dropna(subset=["ticker", "trading_date", "close"])
+        .sort_values(["ticker", "trading_date"])
+        .drop_duplicates(["ticker", "trading_date"], keep="last")
+        .reset_index(drop=True)
     )
 
-    df["volatility_20"] = (
-        grouped["close"]
-        .pct_change()
-        .rolling(20)
-        .std()
-        .reset_index(level=0, drop=True)
+    grouped = df.groupby("ticker", sort=False)["close"]
+    df["return_1d"] = grouped.pct_change(1)
+    df["return_3d"] = grouped.pct_change(3)
+    df["return_5d"] = grouped.pct_change(5)
+    df["volatility_5"] = df.groupby("ticker", sort=False)["return_1d"].transform(
+        lambda x: x.rolling(5).std()
+    )
+    df["volatility_20"] = df.groupby("ticker", sort=False)["return_1d"].transform(
+        lambda x: x.rolling(20).std()
     )
 
-    ma_5 = (
-        grouped["close"]
-        .rolling(5)
-        .mean()
-        .reset_index(level=0, drop=True)
-    )
+    ma_5 = grouped.transform(lambda x: x.rolling(5).mean())
+    ma_20 = grouped.transform(lambda x: x.rolling(20).mean())
+    df["ma_ratio_5"] = df["close"] / ma_5 - 1.0
+    df["ma_ratio_20"] = df["close"] / ma_20 - 1.0
 
-    ma_20 = (
-        grouped["close"]
-        .rolling(20)
-        .mean()
-        .reset_index(level=0, drop=True)
-    )
+    # Метка неизвестна для последней даты, пока не появится следующая цена.
+    df["next_return"] = grouped.shift(-1) / df["close"] - 1.0
+    df["target"] = np.nan
+    labelled = df["next_return"].notna()
+    df.loc[labelled, "target"] = (df.loc[labelled, "next_return"] > 0).astype(int)
 
-    df["ma_ratio_5"] = df["close"] / ma_5
-    df["ma_ratio_20"] = df["close"] / ma_20
-
-    # Следующий торговый день
-    df["next_return"] = (
-        grouped["close"].shift(-1) / df["close"] - 1
-    )
-
-    # Класс:
-    # 1 = рост
-    # 0 = снижение
-    df["target"] = (df["next_return"] > 0).astype(int)
-
-    df = df.dropna(subset=FEATURES + ["next_return"])
-
-    return df
+    return df.dropna(subset=FEATURES).reset_index(drop=True)
 
 
-
-# Модели
 def create_dummy():
-    return DummyClassifier(
-        strategy="prior"
-    )
+    return DummyClassifier(strategy="prior")
 
 
 def create_gradient_boosting():
@@ -160,77 +135,52 @@ def create_xgb():
     )
 
 
-# Пространство XGBOOST
-XGB_PARAMS = {
-    "n_estimators": [100, 200, 300, 400],
-    "learning_rate": [0.01, 0.03, 0.05, 0.10],
-    "max_depth": [2, 3, 4, 5],
-    "min_child_weight": [1, 3, 5, 10],
-    "subsample": [0.7, 0.8, 0.9, 1.0],
-    "colsample_bytree": [0.7, 0.8, 0.9, 1.0],
-    "gamma": [0.0, 0.05, 0.10, 0.20],
-    "reg_alpha": [0.0, 0.01, 0.10, 0.50],
-    "reg_lambda": [1, 2, 5, 10],
-}
-
-
-# Метрики
-
 def calculate_metrics(y_true, y_pred, y_prob):
     result = {
         "accuracy": accuracy_score(y_true, y_pred),
         "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
-        "precision": precision_score(
-            y_true,
-            y_pred,
-            zero_division=0
-        ),
-        "recall": recall_score(
-            y_true,
-            y_pred,
-            zero_division=0
-        ),
-        "f1": f1_score(
-            y_true,
-            y_pred,
-            zero_division=0
-        ),
+        "precision": precision_score(y_true, y_pred, zero_division=0),
+        "recall": recall_score(y_true, y_pred, zero_division=0),
+        "f1": f1_score(y_true, y_pred, zero_division=0),
     }
-
-    if len(np.unique(y_true)) == 2:
-        result["roc_auc"] = roc_auc_score(
-            y_true,
-            y_prob
-        )
-    else:
-        result["roc_auc"] = np.nan
-
+    result["roc_auc"] = (
+        roc_auc_score(y_true, y_prob)
+        if len(np.unique(y_true)) == 2
+        else np.nan
+    )
     return result
 
 
-# Оценка TEST
+def positive_probability(model, X):
+    probabilities = model.predict_proba(X)
+    classes = list(model.classes_)
+    if 1 not in classes:
+        return np.zeros(len(X), dtype=float)
+    return probabilities[:, classes.index(1)]
+
+
 def evaluate_model(model, X_train, y_train, X_test, y_test):
     model.fit(X_train, y_train)
-
     predictions = model.predict(X_test)
-
-    probabilities = model.predict_proba(X_test)[:, 1]
-
-    metrics = calculate_metrics(
-        y_test,
-        predictions,
-        probabilities
-    )
-
-    return metrics
+    probabilities = positive_probability(model, X_test)
+    return calculate_metrics(y_test, predictions, probabilities)
 
 
-# Подбор XGBOOST
 def tune_xgboost(X_train, y_train):
-    tscv = TimeSeriesSplit(
-        n_splits=SEARCH_SPLITS
-    )
+    if len(np.unique(y_train)) < 2:
+        return {
+            "n_estimators": 200,
+            "learning_rate": 0.03,
+            "max_depth": 2,
+            "min_child_weight": 5,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            "gamma": 0.0,
+            "reg_alpha": 0.01,
+            "reg_lambda": 5,
+        }
 
+    tscv = TimeSeriesSplit(n_splits=SEARCH_SPLITS)
     search = RandomizedSearchCV(
         estimator=create_xgb(),
         param_distributions=XGB_PARAMS,
@@ -241,14 +191,12 @@ def tune_xgboost(X_train, y_train):
         n_jobs=-1,
         refit=True,
         verbose=0,
+        error_score=np.nan,
     )
-
     search.fit(X_train, y_train)
-
     return search.best_params_
 
 
-# Обучение XGBOOST
 def create_tuned_xgb(params):
     base_params = {
         "objective": "binary:logistic",
@@ -257,409 +205,161 @@ def create_tuned_xgb(params):
         "n_jobs": -1,
         "random_state": RANDOM_STATE,
     }
-
     base_params.update(params)
-
     return XGBClassifier(**base_params)
 
 
-# Основа
 def run_experiment(df):
     results = []
     final_forecasts = []
     best_params = []
-
     tickers = sorted(df["ticker"].unique())
-
     total_tasks = len(tickers) * len(PERIODS)
     current_task = 0
 
     for ticker in tickers:
-
-        ticker_df = df[
-            df["ticker"] == ticker
-        ].copy()
-
+        ticker_df = df[df["ticker"] == ticker].copy()
         for period, start_date in PERIODS.items():
-
             current_task += 1
-
-            print(
-                f"[{current_task}/{total_tasks}] "
-                f"{ticker} | {period}"
-            )
+            print(f"[{current_task}/{total_tasks}] {ticker} | {period}")
 
             period_df = ticker_df[
-                ticker_df["trading_date"] >= start_date
-            ].copy()
+                ticker_df["trading_date"] >= pd.Timestamp(start_date)
+            ].sort_values("trading_date")
+            labelled = period_df.dropna(subset=FEATURES + ["target"]).reset_index(drop=True)
+            current = period_df.dropna(subset=FEATURES).reset_index(drop=True)
 
-            period_df = period_df.sort_values(
-                "trading_date"
-            )
-
-            if len(period_df) < 100:
+            if len(labelled) < 100 or current.empty:
                 print("  пропуск: мало данных")
                 continue
 
-            X = period_df[FEATURES]
-            y = period_df["target"]
+            split_index = int(len(labelled) * (1.0 - TEST_SIZE))
+            train = labelled.iloc[:split_index]
+            test = labelled.iloc[split_index:]
+            if len(train) < 30 or test.empty:
+                continue
 
-            # Разделение на train/test
-
-            split_index = int(
-                len(period_df) * (1 - TEST_SIZE)
-            )
-
-            X_train = X.iloc[:split_index]
-            y_train = y.iloc[:split_index]
-
-            X_test = X.iloc[split_index:]
-            y_test = y.iloc[split_index:]
-
-            # DUMMY
-            dummy = create_dummy()
+            X_train = train[FEATURES].astype(float).to_numpy()
+            y_train = train["target"].astype(int).to_numpy()
+            X_test = test[FEATURES].astype(float).to_numpy()
+            y_test = test["target"].astype(int).to_numpy()
 
             dummy_metrics = evaluate_model(
-                dummy,
-                X_train,
-                y_train,
-                X_test,
-                y_test
+                create_dummy(), X_train, y_train, X_test, y_test
             )
-
-            results.append({
-                "ticker": ticker,
-                "period": period,
-                "model": "Dummy",
-                **dummy_metrics
-            })
-
-            # GRADIENT BOOSTING
-            gb = create_gradient_boosting()
+            results.append({"ticker": ticker, "period": period, "model": "Dummy", **dummy_metrics})
 
             gb_metrics = evaluate_model(
-                gb,
-                X_train,
-                y_train,
-                X_test,
-                y_test
+                create_gradient_boosting(), X_train, y_train, X_test, y_test
             )
+            results.append({"ticker": ticker, "period": period, "model": "GradientBoosting", **gb_metrics})
 
-            results.append({
-                "ticker": ticker,
-                "period": period,
-                "model": "GradientBoosting",
-                **gb_metrics
-            })
-
-            # XGBOOST HYPERPARAMETER SEARCH
-
-            best_xgb_params = tune_xgboost(
-                X_train,
-                y_train
-            )
-
-            best_params.append({
-                "ticker": ticker,
-                "period": period,
-                **best_xgb_params
-            })
-
-            # XGBOOST
-
-            xgb = create_tuned_xgb(
-                best_xgb_params
-            )
+            best_xgb_params = tune_xgboost(X_train, y_train)
+            best_params.append({"ticker": ticker, "period": period, **best_xgb_params})
 
             xgb_metrics = evaluate_model(
-                xgb,
-                X_train,
-                y_train,
-                X_test,
-                y_test
+                create_tuned_xgb(best_xgb_params), X_train, y_train, X_test, y_test
             )
+            results.append({"ticker": ticker, "period": period, "model": "XGBoost", **xgb_metrics})
 
-            results.append({
-                "ticker": ticker,
-                "period": period,
-                "model": "XGBoost",
-                **xgb_metrics
-            })
+            all_X = labelled[FEATURES].astype(float).to_numpy()
+            all_y = labelled["target"].astype(int).to_numpy()
+            final_model = create_tuned_xgb(best_xgb_params)
+            final_model.fit(all_X, all_y)
 
-            # ФИНАЛЬНЫЙ XGBOOST
-            final_model = create_tuned_xgb(
-                best_xgb_params
-            )
-
-            final_model.fit(
-                X,
-                y
-            )
-
-            last_row = period_df.iloc[[-1]]
-
-            X_last = last_row[FEATURES]
-
-            prediction = int(
-                final_model.predict(X_last)[0]
-            )
-
-            probability_growth = float(
-                final_model.predict_proba(X_last)[0, 1]
-            )
-
-            probability_down = (
-                1 - probability_growth
-            )
-
+            last_row = current.iloc[[-1]]
+            X_last = last_row[FEATURES].astype(float)
+            prediction = int(final_model.predict(X_last)[0])
+            probability_growth = float(positive_probability(final_model, X_last)[0])
             final_forecasts.append({
                 "ticker": ticker,
                 "period": period,
                 "model": "XGBoost",
-                "forecast_date": last_row[
-                    "trading_date"
-                ].iloc[0],
-                "close": last_row[
-                    "close"
-                ].iloc[0],
-                "prediction": (
-                    "GROWTH"
-                    if prediction == 1
-                    else "DOWN"
-                ),
-                "probability_growth": (
-                    f"{probability_growth:.2%}"
-                ),
-                "probability_down": (
-                    f"{probability_down:.2%}"
-                ),
+                "forecast_date": last_row["trading_date"].iloc[0],
+                "close": last_row["close"].iloc[0],
+                "prediction": "GROWTH" if prediction == 1 else "DOWN",
+                "probability_growth": f"{probability_growth:.2%}",
+                "probability_down": f"{1.0 - probability_growth:.2%}",
             })
 
-    return (
-        pd.DataFrame(results),
-        pd.DataFrame(final_forecasts),
-        pd.DataFrame(best_params),
-    )
+    return pd.DataFrame(results), pd.DataFrame(final_forecasts), pd.DataFrame(best_params)
 
-
-# СВОДНАЯ СТАТИСТИКА
 
 def print_summary(results):
     print("Средние результаты TEST")
-
     summary = (
-        results
-        .groupby(["period", "model"])[
-            [
-                "accuracy",
-                "balanced_accuracy",
-                "precision",
-                "recall",
-                "f1",
-                "roc_auc",
-            ]
+        results.groupby(["period", "model"])[
+            ["accuracy", "balanced_accuracy", "precision", "recall", "f1", "roc_auc"]
         ]
         .mean()
         .reset_index()
     )
+    print(summary.to_string(index=False, formatters={
+        "accuracy": "{:.2%}".format,
+        "balanced_accuracy": "{:.2%}".format,
+        "precision": "{:.2%}".format,
+        "recall": "{:.2%}".format,
+        "f1": "{:.2%}".format,
+        "roc_auc": "{:.3f}".format,
+    }))
 
-    print(
-        summary.to_string(
-            index=False,
-            formatters={
-                "accuracy": "{:.2%}".format,
-                "balanced_accuracy": "{:.2%}".format,
-                "precision": "{:.2%}".format,
-                "recall": "{:.2%}".format,
-                "f1": "{:.2%}".format,
-                "roc_auc": "{:.3f}".format,
-            },
-        )
-    )
-
-    print()
-    print("Победители по ACCURACY")
-
+    print("\nПобедители по ACCURACY")
     winners = []
-
     for period in PERIODS:
-
-        period_results = results[
-            results["period"] == period
-        ]
-
-        mean_scores = (
-            period_results
-            .groupby("model")["accuracy"]
-            .mean()
-            .sort_values(
-                ascending=False
-            )
-        )
-
-        winner = mean_scores.index[0]
-
-        winners.append({
-            "period": period,
-            "winner": winner,
-            "accuracy": mean_scores.iloc[0],
-        })
-
-    winners_df = pd.DataFrame(winners)
-
-    print(
-        winners_df.to_string(
-            index=False,
-            formatters={
-                "accuracy": "{:.2%}".format
-            }
-        )
-    )
-
-    print()
-    print("=" * 100)
-    print("КОЛИЧЕСТВО ПОБЕД XGBOOST")
-    print("=" * 100)
+        scores = results[results["period"] == period].groupby("model")["accuracy"].mean()
+        if not scores.empty:
+            winners.append({"period": period, "winner": scores.idxmax(), "accuracy": scores.max()})
+    print(pd.DataFrame(winners).to_string(index=False, formatters={"accuracy": "{:.2%}".format}))
 
     wins = 0
     total = 0
+    for _, group in results.groupby(["ticker", "period"]):
+        if not group.empty:
+            total += 1
+            wins += int(group.loc[group["accuracy"].idxmax(), "model"] == "XGBoost")
+    print(f"\nXGBoost — лучший по Accuracy в {wins} из {total} экспериментов ({wins / total:.2%})")
 
-    for _, group in results.groupby(
-        ["ticker", "period"]
-    ):
-
-        best_model = (
-            group
-            .sort_values(
-                "accuracy",
-                ascending=False
-            )
-            .iloc[0]["model"]
-        )
-
-        total += 1
-
-        if best_model == "XGBoost":
-            wins += 1
-
-    print(
-        f"XGBoost победил в {wins} из {total} "
-        f"экспериментов ({wins / total:.2%})"
-    )
-
-
-# ФИНАЛЬНЫЕ ПРОГНОЗЫ
 
 def print_forecasts(forecasts):
-    print()
-    print("=" * 100)
-    print("ФИНАЛЬНЫЕ ПРОГНОЗЫ")
-    print("=" * 100)
+    print("\nФИНАЛЬНЫЕ ПРОГНОЗЫ")
+    print(forecasts.to_string(index=False))
 
-    print(
-        forecasts.to_string(
-            index=False
-        )
-    )
-
-
-# КОМПАКТНЫЕ ПАРАМЕТРЫ XGBOOST
 
 def print_best_params(params):
-    print()
-    print("=" * 100)
-    print("ЧАСТОТА ВЫБРАННЫХ ПАРАМЕТРОВ XGBOOST")
-    print("=" * 100)
+    print("\nЧАСТОТА ВЫБРАННЫХ ПАРАМЕТРОВ XGBOOST")
+    if params.empty:
+        print("Параметры не рассчитаны.")
+        return
+    for column in [
+        "n_estimators", "learning_rate", "max_depth", "min_child_weight",
+        "subsample", "colsample_bytree", "gamma", "reg_alpha", "reg_lambda",
+    ]:
+        if column in params:
+            print(f"\n{column}:")
+            print(params[column].value_counts().head(5).to_string())
 
-    parameter_columns = [
-        "n_estimators",
-        "learning_rate",
-        "max_depth",
-        "min_child_weight",
-        "subsample",
-        "colsample_bytree",
-        "gamma",
-        "reg_alpha",
-        "reg_lambda",
-    ]
-
-    for column in parameter_columns:
-
-        counts = (
-            params[column]
-            .value_counts()
-            .head(5)
-        )
-
-        print(f"\n{column}:")
-        print(counts.to_string())
-
-
-# MAIN
 
 def main():
-
-    print("=" * 100)
     print("ЗАГРУЗКА ДАННЫХ")
-    print("=" * 100)
-
     df = load_data()
-
-    print(
-        f"Загружено строк: {len(df):,}"
-    )
-
+    print(f"Загружено строк: {len(df):,}")
     df = prepare_features(df)
+    print(f"После подготовки признаков: {len(df):,}")
 
-    print(
-        f"После подготовки признаков: {len(df):,}"
-    )
-
-    print()
-    print("=" * 100)
-    print("ЗАПУСК ЭКСПЕРИМЕНТА")
-    print("=" * 100)
-
-    results, forecasts, params = run_experiment(
-        df
-    )
-
-    # РЕЗУЛЬТАТЫ
+    print("\nЗАПУСК ЭКСПЕРИМЕНТА")
+    results, forecasts, params = run_experiment(df)
+    if results.empty:
+        raise RuntimeError("Не получено ни одной оценки классификатора.")
 
     print_summary(results)
-
     print_forecasts(forecasts)
-
     print_best_params(params)
-
-    # ИТОГ
-
-    print("ИТОГ")
-
-    print(
-        f"Компаний: "
-        f"{results['ticker'].nunique()}/25"
-    )
-
-    print(
-        f"Периодов: "
-        f"{results['period'].nunique()}/4"
-    )
-
-    print(
-        f"Оценок моделей: "
-        f"{len(results)}"
-    )
-
-    print(
-        f"Финальных прогнозов: "
-        f"{len(forecasts)}"
-    )
-
-    print(
-        f"Подборов XGBoost: "
-        f"{len(params)}"
-    )
+    print("\nИТОГ")
+    print(f"Компаний: {results['ticker'].nunique()}/25")
+    print(f"Периодов: {results['period'].nunique()}/4")
+    print(f"Оценок моделей: {len(results)}")
+    print(f"Финальных прогнозов: {len(forecasts)}")
+    print(f"Подборов XGBoost: {len(params)}")
 
 
 if __name__ == "__main__":
