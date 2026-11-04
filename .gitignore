@@ -1,0 +1,9 @@
+.venv/
+.idea/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+.env
+local_db.json
+research_runs/
+data_snapshots/
