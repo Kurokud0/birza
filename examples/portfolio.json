@@ -1,0 +1,9 @@
+{
+  "tickers": ["AFLT", "ALRS", "CHMF", "GAZP", "GMKN", "IRAO", "LKOH", "MGNT", "MOEX", "MTSS", "NLMK", "NVTK", "OZON", "PHOR", "PIKK", "PLZL", "ROSN", "RUAL", "SBER", "SNGS", "SNGSP", "TATN", "TCSG", "VTBR", "YDEX"],
+  "start": "2023-01-03",
+  "end": "2023-12-29",
+  "capital": 100000,
+  "preset": "balanced",
+  "method": "equal_weight",
+  "return_mode": "total_return"
+}
